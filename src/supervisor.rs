@@ -110,12 +110,18 @@ impl Supervisor {
         let script = base.join("runtime.py");
         fs::write(&script, SCRIPT).map_err(|_| "Cannot prepare Hermes bridge")?;
         self.stop();
-        let home = self
-            .context
-            .lock()
-            .unwrap()
-            .workspace_state_dir()
-            .unwrap_or_else(|| base.join("data"));
+        let (home, workspace) = {
+            let context = self.context.lock().unwrap();
+            let home = context
+                .workspace_state_dir()
+                .unwrap_or_else(|| base.join("data"));
+            // The agent works in POM's workspace, not in Hermes's own source.
+            let workspace = context
+                .workspace_root
+                .clone()
+                .unwrap_or_else(|| home.clone());
+            (home, workspace)
+        };
         fs::create_dir_all(&home).map_err(|_| "Cannot create Hermes data directory")?;
         private_directory(&home)?;
         // The upstream installer seeds config.yaml/.env when absent. Put the
@@ -150,6 +156,7 @@ impl Supervisor {
             .arg("serve")
             .arg(&base)
             .arg(&home)
+            .arg(&workspace)
             .current_dir(&base)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -280,8 +287,10 @@ impl Supervisor {
             let _ = child.wait();
         }
         if let Some(mut running) = self.process.lock().unwrap().take() {
+            // Closing stdin makes the bridge end the dashboard and everything
+            // Hermes detached (gateway, TUIs); give its 2 s grace time to finish.
             drop(running.stdin);
-            for _ in 0..30 {
+            for _ in 0..50 {
                 if matches!(running.child.try_wait(), Ok(Some(_))) {
                     return;
                 }

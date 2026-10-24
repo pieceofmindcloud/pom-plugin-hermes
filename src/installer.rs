@@ -518,7 +518,12 @@ mod tests {
         let log = fs::File::create(base.join("bridge-test.log")).unwrap();
         let mut bridge = Command::new(&python)
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime.py"))
-            .args(["serve", base.to_str().unwrap(), home.to_str().unwrap()])
+            .args([
+                "serve",
+                base.to_str().unwrap(),
+                home.to_str().unwrap(),
+                home.to_str().unwrap(),
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(log)

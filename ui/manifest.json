@@ -1,12 +1,18 @@
 {
   "schema": "pom-plugin-ui/v1",
   "plugin_code": "hermes",
-  "lifecycle": "resident",
+  "lifecycle": "on_demand",
   "icon_image": "ui/icon.png",
   "description": {
-    "en": "Install Hermes Agent and open its dashboard inside POM.",
-    "pt-BR": "Instale o Hermes Agent e abra seu painel dentro do POM."
+    "en": "Hermes Agent by Nous Research, the open-source autonomous AI agent, running inside POM on the models your own cluster serves. No cloud bill and no data leaving your machines: one click installs a verified, self-contained runtime, and the agent connects to POM's models on its own.\n\nWhat it does:\n- Works in your POM workspace: reads and edits files, runs terminal commands and code, inspects whole codebases and delegates subtasks.\n- 50+ ready-made skills for software development, research, productivity, creative work and media, plus a skills hub, your own skills and MCP servers.\n- Browses the web, searches papers, builds diagrams and documents, and remembers what matters across sessions.\n- Automates on a schedule with cron jobs, webhooks and a kanban board for long-running goals.\n- Meets you where you are: connect Telegram and other channels and talk to the same agent from your phone.\n- A full dashboard in POM: chat with live model and tool activity, session history, model switching, profiles, logs and settings.\n\nOpens on demand, and closes completely, gateway included, when you stop it from the menu.",
+    "pt-BR": "Hermes Agent, da Nous Research, o agente de IA autônomo e open source, rodando dentro do POM com os modelos que o seu próprio cluster serve. Sem conta de nuvem e sem dados saindo das suas máquinas: um clique instala um runtime verificado e autocontido, e o agente se conecta sozinho aos modelos do POM.\n\nO que ele faz:\n- Trabalha no workspace do POM: lê e edita arquivos, roda comandos e código, inspeciona bases de código inteiras e delega subtarefas.\n- Mais de 50 skills prontas para desenvolvimento de software, pesquisa, produtividade, criação e mídia, além de um hub de skills, skills próprias e servidores MCP.\n- Navega na web, pesquisa artigos, cria diagramas e documentos e lembra o que importa entre sessões.\n- Automatiza com agendamentos cron, webhooks e um quadro kanban para objetivos longos.\n- Fala com você onde você estiver: conecte o Telegram e outros canais e converse com o mesmo agente pelo celular.\n- Painel completo no POM: chat com a atividade do modelo e das ferramentas ao vivo, histórico de sessões, troca de modelo, perfis, logs e configurações.\n\nAbre sob demanda e fecha por completo, gateway incluído, quando você o para pelo menu."
   },
+  "screenshots": [
+    "docs/screenshots/chat.png",
+    "docs/screenshots/skills.png",
+    "docs/screenshots/sessions.png",
+    "docs/screenshots/models.png"
+  ],
   "documentation": {
     "guides": [
       {

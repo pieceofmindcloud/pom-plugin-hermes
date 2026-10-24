@@ -105,11 +105,14 @@ class Bridge(http.server.BaseHTTPRequestHandler):
                 yield block
 
     def websocket(self, headers, target):
+        # POM sends lowercase names; a second Upgrade makes uvicorn answer 426.
+        had_origin = any(key.lower() == "origin" for key in headers)
+        headers = {key: value for key, value in headers.items() if key.lower() not in ("upgrade", "origin")}
         upstream = socket.create_connection(("127.0.0.1", target), timeout=10)
         try:
             headers["Upgrade"] = "websocket"
             headers["Connection"] = "Upgrade"
-            if "Origin" in headers:
+            if had_origin:
                 headers["Origin"] = f"http://127.0.0.1:{target}"
             request = f"{self.command} {self.path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
             upstream.sendall(request.encode())
@@ -142,7 +145,106 @@ class Bridge(http.server.BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = handle_request
 
 
-def serve(base, home):
+def adopt_orphans():
+    """Linux: Hermes detaches its gateway daemon and puts each TUI in its own
+    session; as subreaper the bridge inherits them instead of PID 1, so closing
+    the plugin finds and reaps every one."""
+    if not sys.platform.startswith("linux"):
+        return False
+    import ctypes
+    try:
+        return ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        return False
+
+
+def reap_orphans(keep):
+    """Collect adopted zombies, leaving `keep` (the Popen dashboard) to Popen."""
+    while True:
+        try:
+            info = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return
+        if info is None or info.si_pid == keep:
+            return
+        try:
+            os.waitpid(info.si_pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+
+
+def process_parents():
+    parents = {}
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if entry.isdigit():
+                try:
+                    with open(f"/proc/{entry}/stat") as stat:
+                        fields = stat.read().rsplit(")", 1)[1].split()
+                except OSError:
+                    continue
+                if fields[0] != "Z":
+                    parents[int(entry)] = int(fields[1])
+        return parents
+    listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        pid, ppid = line.split()
+        parents[int(pid)] = int(ppid)
+    return parents
+
+
+def hermes_processes(root, home):
+    """The bridge's live descendants plus the gateway Hermes recorded for this
+    home, which leaves the tree where there is no subreaper (macOS, Windows)."""
+    parents = process_parents()
+    found, frontier = set(), {root}
+    while frontier:
+        frontier = {pid for pid, ppid in parents.items() if ppid in frontier and pid not in found}
+        found |= frontier
+    try:
+        record = json.loads((Path(home) / "gateway.pid").read_text())
+        pid = int(record["pid"])
+        if Path(record.get("hermes_home", "")) == Path(home) and pid in parents and pid != os.getpid():
+            found.add(pid)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return found
+
+
+def stop_hermes(child, home, grace=2.0):
+    """End the dashboard and everything Hermes left running for this home."""
+    if os.name == "nt":
+        targets = {child.pid} | hermes_processes(child.pid, home)
+        for pid in targets:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        child.wait()
+        return
+    started = time.monotonic()
+    deadline = started + grace
+    signalled = set()
+    while True:
+        alive = hermes_processes(os.getpid(), home)
+        if not alive:
+            break
+        hard = time.monotonic() >= deadline
+        for pid in alive if hard else alive - signalled:
+            try:
+                os.kill(pid, signal.SIGKILL if hard else signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        signalled |= alive
+        time.sleep(0.05)
+        child.poll()
+        reap_orphans(child.pid)
+    child.wait()
+    reap_orphans(None)
+    print(f"stopped {len(signalled)} Hermes processes in {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
+
+
+def serve(base, home, workspace):
+    adopt_orphans()
+    # PDEATHSIG and POM stopping the host arrive as SIGTERM: still run the cleanup.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -157,7 +259,7 @@ def serve(base, home):
     log = (base / "dashboard.log").open("ab", buffering=0)
     child = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", "dashboard", "--no-open",
                               "--host", "127.0.0.1", "--port", str(port)],
-                             cwd=base / "source", env=env, stdin=subprocess.DEVNULL,
+                             cwd=workspace, env=env, stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, start_new_session=(os.name != "nt"),
                              creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
     try:
@@ -179,25 +281,18 @@ def serve(base, home):
         print(json.dumps({"status": "ready", "port": server.server_port, "token": server.secret}), flush=True)
         import threading
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        if os.name != "nt":
+            threading.Thread(target=lambda: [reap_orphans(child.pid) or time.sleep(5) for _ in iter(int, 1)],
+                             daemon=True).start()
         while sys.stdin.buffer.read(1):
             pass
         server.shutdown()
     finally:
-        if child.poll() is None:
-            if os.name == "nt":
-                child.terminate()
-            else:
-                os.killpg(child.pid, signal.SIGTERM)
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                child.kill()
-            else:
-                os.killpg(child.pid, signal.SIGKILL)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        stop_hermes(child, home)
         log.close()
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "serve":
-        serve(Path(sys.argv[2]), Path(sys.argv[3]))
+        serve(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
