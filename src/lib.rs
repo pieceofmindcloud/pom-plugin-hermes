@@ -60,11 +60,8 @@ impl Plugin {
             }
             "rpc.status" => Ok(self.supervisor.status().public()),
             "rpc.install" => {
-                if request["profile"] != "admin" {
-                    return Ok(
-                        json!({"error":"Only this node's admin can install Hermes","code":"admin_required"}),
-                    );
-                }
+                // Plugins are local to their node; every node profile may
+                // configure the application it installed on its own machine.
                 let model = request["params"]["model"]
                     .as_str()
                     .map(str::trim)
@@ -135,14 +132,8 @@ mod tests {
         }
     }
     #[test]
-    fn admin_only_and_no_proxy_before_install() {
+    fn no_proxy_before_install() {
         let plugin = Plugin::new(&Value::Null).unwrap();
-        assert_eq!(
-            plugin
-                .query(&json!({"operation":"rpc.install","profile":"visitor"}))
-                .unwrap()["code"],
-            "admin_required"
-        );
         assert_eq!(
             plugin.query(&json!({"operation":"ui.upstream"})).unwrap()["status"],
             "starting"
