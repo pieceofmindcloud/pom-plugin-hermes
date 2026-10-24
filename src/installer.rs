@@ -407,6 +407,40 @@ mod tests {
         .unwrap();
         assert!(python.is_file());
         assert!(base.join("source/hermes_cli/web_dist/index.html").is_file());
+        let log = fs::File::create(base.join("bridge-test.log")).unwrap();
+        let mut bridge = Command::new(&python)
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime.py"))
+            .args(["serve", base.to_str().unwrap(), home.to_str().unwrap()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        use std::io::BufRead;
+        io::BufReader::new(bridge.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let ready: serde_json::Value =
+            serde_json::from_str(&line).expect("dashboard did not start; see bridge-test.log");
+        let port = ready["port"].as_u64().unwrap();
+        let token = ready["token"].as_str().unwrap();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(Duration::from_secs(15))
+            .build();
+        for path in ["/", "/api/status"] {
+            let url = format!("http://127.0.0.1:{port}{path}");
+            let response = agent
+                .get(&url)
+                .set("x-pom-plugin-token", token)
+                .call()
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body = response.into_string().unwrap();
+            assert!(!body.is_empty());
+        }
+        drop(bridge.stdin.take());
+        assert!(bridge.wait().unwrap().success());
     }
 
     #[test]

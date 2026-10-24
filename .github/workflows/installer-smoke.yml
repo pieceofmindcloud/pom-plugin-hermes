@@ -1,0 +1,47 @@
+name: Standalone Hermes install smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Operating system for the full install and dashboard test
+        type: choice
+        required: true
+        default: windows-latest
+        options:
+          - windows-latest
+          - macos-latest
+          - ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: 22
+      - name: Build the Windows plugin library
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ./scripts/build-ui.sh
+          cargo build --locked --release
+          test -f target/release/pom_plugin_hermes.dll
+      - name: Install Hermes and test the live authenticated dashboard
+        shell: bash
+        run: |
+          if ! cargo test --locked installer::tests::installs_without_system_python_git_or_curl -- --ignored --nocapture > install-smoke.log 2>&1; then
+            tail -n 160 install-smoke.log
+            exit 1
+          fi
+          tail -n 60 install-smoke.log

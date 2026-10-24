@@ -26,4 +26,4 @@ tests/test_ci_plan.sh
 scripts/package.sh --platform linux-x86_64 --version 0.1.0
 ```
 
-For a full network-backed standalone Linux install test (downloads several gigabytes), run `cargo test --locked installer::tests::installs_without_system_python_git_or_curl -- --ignored --nocapture`. The local dev rebuild uses `scripts/dev-ui.sh` and a read-only source mount. The built UI, manifest and docs ship inside the verified cdylib; `scripts/package.sh` produces the GitHub release asset and per-platform manifest. The library is loaded only by `pom-plugin-host`.
+For a full network-backed standalone install and authenticated dashboard test (downloads several gigabytes), run `cargo test --locked installer::tests::installs_without_system_python_git_or_curl -- --ignored --nocapture`; the manual **Standalone Hermes install smoke** GitHub Actions workflow offers the same test on Windows, macOS and Linux. The local dev rebuild uses `scripts/dev-ui.sh` and a read-only source mount. The built UI, manifest and docs ship inside the verified cdylib; `scripts/package.sh` produces the GitHub release asset and per-platform manifest. The library is loaded only by `pom-plugin-host`.
