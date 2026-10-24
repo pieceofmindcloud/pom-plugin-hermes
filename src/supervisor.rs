@@ -132,6 +132,16 @@ impl Supervisor {
         let python = installer::ensure(&base, &home, |command| {
             self.run_install_step(command, &base)
         })?;
+        if let Some(gateway) = self.context.lock().unwrap().gateway.clone() {
+            installer::register_pom(
+                &base,
+                &home,
+                &python,
+                &gateway.openai_base_url,
+                &gateway.api_key,
+                |command| self.run_install_step(command, &base),
+            )?;
+        }
         self.set("starting", "Starting Hermes dashboard");
         let log =
             fs::File::create(base.join("bridge.log")).map_err(|_| "Cannot open bridge log")?;

@@ -4,10 +4,10 @@
   "main.setup": "Configuração",
   "main.open": "Abrir Hermes",
   "main.loading": "Carregando...",
-  "main.explain": "Instale a versão fixada do Hermes Agent neste nó. Se quiser, conecte agora um modelo implantado no POM ou configure o provedor no Hermes após a instalação. A instalação pode levar vários minutos.",
+  "main.explain": "Instale a versão fixada do Hermes Agent neste nó. Os modelos implantados no POM são carregados no Hermes automaticamente após a instalação. A instalação pode levar vários minutos.",
   "main.model": "ID do modelo POM (opcional)",
   "main.modelPlaceholder": "ID do modelo implantado",
-  "main.optional": "Deixe vazio para escolher um provedor no painel do Hermes. As credenciais ficam apenas neste nó.",
+  "main.optional": "Deixe vazio para escolher um provedor no painel do Hermes. Os modelos implantados no POM aparecem no Hermes sob o provedor POM. As credenciais ficam apenas neste nó.",
   "main.install": "Instalar e abrir Hermes",
   "main.retry": "Tentar novamente"
 }

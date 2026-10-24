@@ -15,6 +15,8 @@ const SOURCE_SHA: &str = "c6a3a8abdcebe82bc634761186b0fc51438bf5da06254ce0f486a3
 const SOURCE_URL: &str = "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/5894e750c3dba980d43b25aa29e3958149ba2c61";
 const MAX_SOURCE: u64 = 512 * 1024 * 1024;
 const MAX_UV: u64 = 100 * 1024 * 1024;
+const PROXY_BASE: &str = "/api/ui/plugins/hermes/proxy/";
+const WEB_MARKER: &str = ".pom-prefixed-web-v1";
 
 #[derive(Clone, Copy)]
 struct Artifact {
@@ -299,6 +301,73 @@ fn find_python(base: &Path) -> Result<PathBuf, String> {
     Err("Managed Python executable missing".into())
 }
 
+fn configure_web_base(source: &Path) -> Result<(), String> {
+    let config_path = source.join("web/vite.config.ts");
+    let config = fs::read_to_string(&config_path).map_err(|_| "Hermes web build config missing")?;
+    let assignment = format!("  base: {PROXY_BASE:?},\n");
+    if config.contains(&assignment) {
+        return Ok(());
+    }
+    let anchor = "export default defineConfig({\n";
+    if !config.contains(anchor) {
+        return Err("Pinned Hermes web build config changed unexpectedly".into());
+    }
+    fs::write(
+        config_path,
+        config.replacen(anchor, &format!("{anchor}{assignment}"), 1),
+    )
+    .map_err(|_| "Cannot configure prefixed Hermes dashboard".to_owned())
+}
+
+fn web_is_prefixed(source: &Path) -> bool {
+    fs::read_to_string(source.join("hermes_cli/web_dist/index.html"))
+        .is_ok_and(|html| html.contains("/api/ui/plugins/hermes/proxy/assets/"))
+}
+
+fn ensure_web_base(
+    base: &Path,
+    home: &Path,
+    python: &Path,
+    source: &Path,
+    run: &mut impl FnMut(Command) -> Result<(), String>,
+) -> Result<(), String> {
+    if source.join(WEB_MARKER).is_file() && web_is_prefixed(source) {
+        return Ok(());
+    }
+    configure_web_base(source)?;
+    let mut web = Command::new(python);
+    web.args(["-c", "from pathlib import Path; from pm.environments import activate_dependencies; from hermes_cli.source_build import source_build_env, prepare_source_dependencies, build_source_web; root=Path.cwd(); activate_dependencies(root); env=source_build_env(explicit=True); prepare_source_dependencies(root, ('web',), env=env, explicit=True); build_source_web(root, env=env)"]);
+    environment(&mut web, base, home, source);
+    run(web)?;
+    if !web_is_prefixed(source) {
+        return Err(
+            "Hermes dashboard assets do not use the POM proxy path; see install.log".into(),
+        );
+    }
+    fs::write(source.join(WEB_MARKER), PROXY_BASE)
+        .map_err(|_| "Cannot mark Hermes dashboard build".to_owned())
+}
+
+/// Register a named POM provider with Hermes's own configuration API. The
+/// gateway key travels only in the child's environment, never argv or IPC.
+pub fn register_pom(
+    base: &Path,
+    home: &Path,
+    python: &Path,
+    url: &str,
+    key: &str,
+    mut run: impl FnMut(Command) -> Result<(), String>,
+) -> Result<(), String> {
+    let script = base.join("pom_provider.py");
+    fs::write(&script, include_str!("../pom_provider.py"))
+        .map_err(|_| "Cannot prepare POM model integration")?;
+    let source = base.join("source");
+    let mut command = Command::new(python);
+    command.arg(script).arg(url).env("POM_GATEWAY_KEY", key);
+    environment(&mut command, base, home, &source);
+    run(command)
+}
+
 /// `run` owns children so a plugin-host shutdown can stop installation.
 pub fn ensure(
     base: &Path,
@@ -311,7 +380,9 @@ pub fn ensure(
         && fs::read_to_string(&marker).ok().as_deref() == Some(SOURCE_SHA)
         && source.join("hermes_cli/web_dist/index.html").is_file()
     {
-        return find_python(base);
+        let python = find_python(base)?;
+        ensure_web_base(base, home, &python, &source, &mut run)?;
+        return Ok(python);
     }
     let source_archive = base.join("source.tar.gz");
     download(SOURCE_URL, &source_archive, SOURCE_SHA, MAX_SOURCE)?;
@@ -344,6 +415,7 @@ pub fn ensure(
     environment(&mut pm, base, home, &source);
     run(pm)?;
     seed_config(home, &source)?;
+    configure_web_base(&source)?;
     // The upstream installer's own completion tail builds the TUI and web
     // dashboard, syncs skills, migrates config and writes its source stamp.
     let mut completion = Command::new(&python);
@@ -359,9 +431,13 @@ pub fn ensure(
         .arg(&source);
     environment(&mut completion, base, home, &source);
     run(completion)?;
-    if !source.join("hermes_cli/web_dist/index.html").is_file() {
-        return Err("Hermes dashboard build is missing; see install.log".into());
+    if !web_is_prefixed(&source) {
+        return Err(
+            "Hermes dashboard assets do not use the POM proxy path; see install.log".into(),
+        );
     }
+    fs::write(source.join(WEB_MARKER), PROXY_BASE)
+        .map_err(|_| "Cannot mark Hermes dashboard build".to_owned())?;
     fs::write(marker, SOURCE_SHA).map_err(|_| "Cannot mark Hermes installation")?;
     let _ = fs::remove_file(source_archive);
     Ok(python)
@@ -407,6 +483,38 @@ mod tests {
         .unwrap();
         assert!(python.is_file());
         assert!(base.join("source/hermes_cli/web_dist/index.html").is_file());
+        let run_step = |mut command: Command| -> Result<(), String> {
+            #[cfg(unix)]
+            command.env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", base.join("blocked-bin").display()),
+            );
+            let status = command.status().map_err(|e| e.to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("installer exited: {status}"))
+            }
+        };
+        // POM models: register the named provider with Hermes's own config
+        // API. The gateway is unreachable in this sandbox, so the provider is
+        // registered without a cached model list and the key stays in .env.
+        register_pom(
+            &base,
+            &home,
+            &python,
+            "http://127.0.0.1:65432/v1",
+            "sk-pom-e2e-fake",
+            run_step,
+        )
+        .unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(env_text.contains("POM_API_KEY=sk-pom-e2e-fake"));
+        assert!(!env_text.contains("OPENAI_API_KEY=sk-pom-e2e-fake"));
+        let config = fs::read_to_string(home.join("config.yaml")).unwrap();
+        assert!(config.contains("pom:"));
+        assert!(config.contains("base_url: http://127.0.0.1:65432/v1"));
+        assert!(config.contains("key_env: POM_API_KEY"));
         let log = fs::File::create(base.join("bridge-test.log")).unwrap();
         let mut bridge = Command::new(&python)
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime.py"))
@@ -441,6 +549,31 @@ mod tests {
         }
         drop(bridge.stdin.take());
         assert!(bridge.wait().unwrap().success());
+    }
+
+    #[test]
+    fn web_base_patch_is_precise_and_idempotent() {
+        let base = std::env::temp_dir().join(format!("hermes-vite-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let source = base.join("source");
+        fs::create_dir_all(source.join("web")).unwrap();
+        fs::write(
+            source.join("web/vite.config.ts"),
+            "export default defineConfig({\n  plugins: [],\n})\n",
+        )
+        .unwrap();
+        configure_web_base(&source).unwrap();
+        let text = fs::read_to_string(source.join("web/vite.config.ts")).unwrap();
+        assert_eq!(text.matches("base:").count(), 1);
+        assert!(text.contains(&format!("base: {PROXY_BASE:?},")));
+        configure_web_base(&source).unwrap();
+        fs::write(
+            source.join("web/vite.config.ts"),
+            "export default defineConfig({ plugins: [] })\n",
+        )
+        .unwrap();
+        assert!(configure_web_base(&source).is_err());
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
