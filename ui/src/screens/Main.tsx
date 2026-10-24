@@ -12,6 +12,7 @@ export function Main() {
   const [error, setError] = useState<unknown>(null);
   const [model, setModel] = useState("");
   const [showSetup, setShowSetup] = useState(false);
+  const [frameLoaded, setFrameLoaded] = useState(false);
   const load = useCallback(() => {
     rpc<Status>("status").then((value) => { setStatus(value); setError(null); }, setError);
   }, []);
@@ -20,7 +21,7 @@ export function Main() {
     const timer = window.setInterval(load, 2500);
     return () => window.clearInterval(timer);
   }, [load]);
-  useScreenReady(status !== null || error !== null);
+  useScreenReady((status !== null && (status.status !== "ready" || showSetup || frameLoaded)) || error !== null);
 
   const install = async () => {
     try {
@@ -35,7 +36,8 @@ export function Main() {
     <PageHeader title={t("main.title")} subtitle={t("main.subtitle")}
       actions={status?.status === "ready" ? <Button variant="outline" size="sm" onClick={() => setShowSetup(!showSetup)}>{showSetup ? t("main.open") : t("main.setup")}</Button> : undefined} />
     {status?.status === "ready" && !showSetup ? (
-      <iframe className="pb-dashboard" src={URL} title="Hermes Agent" allow="clipboard-read; clipboard-write" />
+      <iframe className="pb-dashboard" src={URL} title="Hermes Agent" allow="clipboard-read; clipboard-write"
+        onLoad={() => setFrameLoaded(true)} onError={() => setFrameLoaded(true)} />
     ) : <Panel>
       <PanelHeader title={t("main.setup")} />
       <div className="pb-setup">
