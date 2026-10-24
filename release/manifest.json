@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "plugin_code": "hermes",
+  "plugin_abi": 1,
+  "feature_set": ["hermes.core"]
+}

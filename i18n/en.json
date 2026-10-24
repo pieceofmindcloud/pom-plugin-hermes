@@ -1,0 +1,13 @@
+{
+  "main.title": "Hermes Agent",
+  "main.subtitle": "Install and use the Hermes dashboard within POM",
+  "main.setup": "Setup",
+  "main.open": "Open Hermes",
+  "main.loading": "Loading...",
+  "main.explain": "Install the pinned Hermes Agent release on this node. Optionally connect a deployed POM model now, or configure your provider inside Hermes after installation. Installation may take several minutes.",
+  "main.model": "POM model ID (optional)",
+  "main.modelPlaceholder": "Deployed model ID",
+  "main.optional": "Leave blank to choose a provider in the Hermes dashboard. Credentials are stored only on this node.",
+  "main.install": "Install and open Hermes",
+  "main.retry": "Retry installation"
+}

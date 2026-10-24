@@ -1,0 +1,7 @@
+/target
+/dist-release
+/ui/node_modules
+/ui/dist
+.DS_Store
+__pycache__/
+*.pyc
