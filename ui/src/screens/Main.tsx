@@ -30,8 +30,6 @@ export function Main() {
   const asked = useRef(false);
   // The dashboard was on screen, so a later error means it stopped.
   const opened = useRef(false);
-  // "Try again" was clicked: an `error` read before the retry took hold is stale.
-  const retrying = useRef(false);
 
   const load = useCallback(() => {
     rpc<Status>("status").then(setStatus, (reason: unknown) =>
@@ -54,18 +52,11 @@ export function Main() {
     const timer = window.setInterval(load, installing ? 1000 : 2500);
     return () => window.clearInterval(timer);
   }, [load, installing]);
-  useEffect(
-    () =>
-      onLoaderRetry(() => {
-        retrying.current = true;
-        install();
-      }),
-    [install],
-  );
+  // `rpc.install` moves the status off the error before it answers.
+  useEffect(() => onLoaderRetry(install), [install]);
 
   useEffect(() => {
     if (!status) return;
-    if (status.status !== "error") retrying.current = false;
     const say = t.current;
     if (status.mode) mode.current = status.mode;
     const title = say(mode.current === "update" ? "loader.updating" : "loader.installing");
@@ -84,7 +75,6 @@ export function Main() {
           : loader.show({ message: say("step.starting") }));
         break;
       case "error":
-        if (retrying.current) break;
         void loader.error({ title: opened.current ? say("loader.stopped") : undefined, message: status.detail });
         break;
       case "ready":

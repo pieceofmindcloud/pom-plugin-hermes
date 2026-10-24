@@ -128,18 +128,31 @@ impl Supervisor {
             }
         }
     }
-    pub fn launch(self: &Arc<Self>, model: Option<String>) -> bool {
+    /// `None` while another launch runs; `Some(false)` when the dashboard is
+    /// already up and nothing has to start; `Some(true)` when the caller starts
+    /// it, the phase already moved off any previous error: `rpc.install` answers
+    /// before the thread runs, and the screen's next poll must not read the old
+    /// error as the new attempt's.
+    fn begin_launch(&self, reconfigure: bool) -> Option<bool> {
         let mut busy = self.busy.lock().unwrap();
         if *busy {
-            return false;
+            return None;
         }
         // Reconfiguration must not stop a ready dashboard; no automatic restart
         // of an already running process merely to refresh a gateway credential.
-        if model.is_none() && self.status().phase == "ready" {
-            return true;
+        if !reconfigure && self.status().phase == "ready" {
+            return Some(false);
         }
         *busy = true;
-        drop(busy);
+        self.set("starting", "Starting Hermes dashboard");
+        Some(true)
+    }
+    pub fn launch(self: &Arc<Self>, model: Option<String>) -> bool {
+        match self.begin_launch(model.is_some()) {
+            None => return false,
+            Some(false) => return true,
+            Some(true) => {}
+        }
         let this = Arc::clone(self);
         thread::spawn(move || {
             if let Err(error) = this.start(model) {
@@ -485,6 +498,22 @@ mod tests {
             ready.get("step").is_none()
                 && ready.get("progress").is_none()
                 && ready.get("mode").is_none()
+        );
+    }
+
+    #[test]
+    fn an_accepted_launch_leaves_the_error_at_once() {
+        // `rpc.install` returns before the install thread runs; a poll in
+        // between must not read the previous error, or a retry that fails
+        // again at once is never seen as a new error.
+        let supervisor = Supervisor::new();
+        supervisor.set("error", "Runtime download interrupted");
+        assert_eq!(supervisor.begin_launch(false), Some(true));
+        assert_eq!(supervisor.status().phase, "starting");
+        assert_eq!(
+            supervisor.begin_launch(false),
+            None,
+            "a second launch while busy"
         );
     }
 
