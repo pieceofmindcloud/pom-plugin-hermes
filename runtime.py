@@ -1,5 +1,4 @@
-"""Verified upstream installer and loopback dashboard bridge. No Hermes source is vendored."""
-import hashlib
+"""Loopback dashboard bridge using Hermes PM's managed Python on every platform."""
 import http.client
 import http.server
 import json
@@ -11,64 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
-import tarfile
 import time
-import urllib.request
-
-REV = "5894e750c3dba980d43b25aa29e3958149ba2c61"
-SHA256 = "c6a3a8abdcebe82bc634761186b0fc51438bf5da06254ce0f486a3d6167ed1be"
-URL = f"https://codeload.github.com/NousResearch/hermes-agent/tar.gz/{REV}"
-MAX_ARCHIVE = 512 * 1024 * 1024
-
-
-def install(base, home):
-    """Run the exact upstream installer with a pinned commit, no interactive setup.
-
-    The official PM installs its own verified Python 3.14, uv, Node, web assets
-    and dependencies. pip-installing Hermes on system Python is not supported.
-    """
-    base.mkdir(parents=True, exist_ok=True)
-    home.mkdir(parents=True, exist_ok=True)
-    source = base / "source"
-    marker = base / ".installed"
-    launcher = source / ".hermes/bin/hermes"
-    if (marker.is_file() and marker.read_text() == SHA256
-            and launcher.is_file() and (source / "hermes_cli/web_dist/index.html").is_file()):
-        return
-    archive = base / "source.tar.gz"
-    if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != SHA256:
-        digest = hashlib.sha256()
-        size = 0
-        with urllib.request.urlopen(URL, timeout=60) as response, archive.open("wb") as output:
-            while block := response.read(256 * 1024):
-                size += len(block)
-                if size > MAX_ARCHIVE:
-                    raise ValueError("Hermes source archive exceeds limit")
-                output.write(block)
-                digest.update(block)
-        if digest.hexdigest() != SHA256:
-            archive.unlink(missing_ok=True)
-            raise ValueError("Hermes source checksum mismatch")
-    # Extract only the upstream install script, never an unverified full tree.
-    script = base / "install.sh"
-    with tarfile.open(archive, "r:gz") as tar:
-        entry = tar.getmember(f"hermes-agent-{REV}/scripts/install.sh")
-        with tar.extractfile(entry) as reader, script.open("wb") as output:
-            import shutil
-            shutil.copyfileobj(reader, output)
-    env = os.environ.copy()
-    env.update({"HERMES_HOME": str(home), "HOME": str(home), "HERMES_RUNTIME_DIR": str(base / "tools"),
-                "CI": "1", "HERMES_INSTALL_VERBOSE": "1"})
-    # --commit also checks that REV is on upstream's main branch. A retry
-    # resumes the checkout and PM generations instead of deleting user data.
-    subprocess.run(["bash", str(script), "--commit", REV, "--dir", str(source),
-                    "--hermes-home", str(home), "--non-interactive",
-                    "--skip-browser", "--skip-computer-use"], check=True,
-                   cwd=base, env=env, stdin=subprocess.DEVNULL)
-    if not launcher.is_file() or not (source / "hermes_cli/web_dist/index.html").is_file():
-        raise ValueError("Hermes dashboard build is missing; see install.log")
-    archive.unlink(missing_ok=True)
-    marker.write_text(SHA256)
 
 
 class Bridge(http.server.BaseHTTPRequestHandler):
@@ -82,8 +24,8 @@ class Bridge(http.server.BaseHTTPRequestHandler):
         if not secrets.compare_digest(token, self.server.secret):
             self.send_error(401)
             return
-        # POM already authenticates the browser, strips its Authorization and
-        # checks Origin before attaching its private x-pom-plugin-token.
+        # POM authenticates the browser, strips its Authorization and checks
+        # Origin before attaching the private x-pom-plugin-token.
         target = self.server.target
         headers = {key: value for key, value in self.headers.items() if key.lower() not in
                    ("host", "connection", "x-pom-plugin-token", "authorization", "cookie", "x-forwarded-prefix", "content-length", "transfer-encoding")}
@@ -131,9 +73,8 @@ class Bridge(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     def request_body(self, chunked, length):
-        # POM streams request bodies using chunked transfer encoding. Decode
-        # the framing and let HTTPConnection re-chunk to Hermes: never buffer
-        # the whole upload in the plugin process.
+        # POM streams request bodies with chunked encoding. Re-chunk to Hermes;
+        # never buffer a whole upload in the plugin process.
         total = 0
         if chunked:
             while True:
@@ -207,13 +148,18 @@ def serve(base, home):
         port = reservation.getsockname()[1]
     hermes_token = secrets.token_urlsafe(32)
     env = os.environ.copy()
-    env.update({"HERMES_HOME": str(home), "HOME": str(home), "HERMES_RUNTIME_DIR": str(base / "tools"),
-                "HERMES_DASHBOARD_SESSION_TOKEN": hermes_token})
+    env.update({"HERMES_HOME": str(home), "HERMES_RUNTIME_DIR": str(base / "tools"),
+                "HERMES_DASHBOARD_SESSION_TOKEN": hermes_token, "PYTHONPATH": str(base / "source")})
+    if os.name != "nt":
+        env["HOME"] = str(home)
+    else:
+        env["USERPROFILE"] = str(home)
     log = (base / "dashboard.log").open("ab", buffering=0)
-    child = subprocess.Popen([str(base / "source/.hermes/bin/hermes"), "dashboard", "--no-open",
+    child = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", "dashboard", "--no-open",
                               "--host", "127.0.0.1", "--port", str(port)],
                              cwd=base / "source", env=env, stdin=subprocess.DEVNULL,
-                             stdout=log, stderr=log, start_new_session=True)
+                             stdout=log, stderr=log, start_new_session=(os.name != "nt"),
+                             creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
     try:
         for _ in range(120):
             if child.poll() is not None:
@@ -238,16 +184,20 @@ def serve(base, home):
         server.shutdown()
     finally:
         if child.poll() is None:
-            os.killpg(child.pid, signal.SIGTERM)
+            if os.name == "nt":
+                child.terminate()
+            else:
+                os.killpg(child.pid, signal.SIGTERM)
         try:
             child.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
+            if os.name == "nt":
+                child.kill()
+            else:
+                os.killpg(child.pid, signal.SIGKILL)
         log.close()
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "install":
-        install(Path(sys.argv[2]), Path(sys.argv[3]))
-    elif sys.argv[1] == "serve":
+    if sys.argv[1] == "serve":
         serve(Path(sys.argv[2]), Path(sys.argv[3]))

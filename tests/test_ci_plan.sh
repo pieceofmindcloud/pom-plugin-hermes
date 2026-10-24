@@ -11,7 +11,8 @@ out="$(plan RELEASE_MACOS=true VERSION_MACOS=v0.2.0)"
 
 out="$(plan RELEASE_LINUX=true VERSION_LINUX=v0.1.0 RELEASE_MACOS=true VERSION_MACOS=v0.2.0)"
 [[ "$(jq -r '[.include[] | .name + "=" + .version] | join(",")' <<<"$out")" == "linux=v0.1.0,macos=v0.2.0" ]] || fail 'independent versions'
-plan RELEASE_WINDOWS=true VERSION_WINDOWS=v0.1.0 2>/dev/null && fail 'unsupported Windows release must fail'
+out="$(plan RELEASE_WINDOWS=true VERSION_WINDOWS=v0.3.0)"
+[[ "$(jq -r '.include[0].platform + " " + .include[0].target + " " + .include[0].ext' <<<"$out")" == "windows-x86_64 x86_64-pc-windows-msvc dll" ]] || fail 'Windows entry'
 
 plan RELEASE_LINUX=false 2>/dev/null && fail 'empty selection must fail'
 plan RELEASE_LINUX=true VERSION_LINUX= 2>/dev/null && fail 'empty version must fail'

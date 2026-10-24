@@ -1,6 +1,7 @@
 //! Hermes Agent dashboard integration. POM loads this cdylib in an isolated host.
 mod abi;
 mod context;
+mod installer;
 mod supervisor;
 
 use context::Context;

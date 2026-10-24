@@ -110,10 +110,11 @@ mod tests {
 
     #[test]
     fn reads_every_part_of_host_configure() {
+        let workspace = std::env::temp_dir().join("hermes-context-test");
         let context = Context::from_configure(&json!({
             "operation": "host.configure",
             "gateway": {"openai_base_url": "http://127.0.0.1:8080/v1/", "api_key": "sk-x"},
-            "workspace_root": "/data/workspace",
+            "workspace_root": workspace,
             "host_api": {"base_url": "http://127.0.0.1:8080/api/plugin-host", "token": "t"},
             "preferences": {"features": {"example_feature_enabled": true}, "storage_directory": null}
         }))
@@ -122,10 +123,7 @@ mod tests {
             context.gateway.as_ref().unwrap().openai_base_url,
             "http://127.0.0.1:8080/v1"
         );
-        assert_eq!(
-            context.workspace_root,
-            Some(PathBuf::from("/data/workspace"))
-        );
+        assert_eq!(context.workspace_root, Some(workspace));
         assert!(context.host_api.is_some());
         assert_eq!(
             context.preferences["features"]["example_feature_enabled"],

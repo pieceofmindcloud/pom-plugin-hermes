@@ -15,7 +15,7 @@ add() {
 
 add linux   "${RELEASE_LINUX:-false}"   "${VERSION_LINUX:-}"   ubuntu-latest so    linux-x86_64  x86_64-unknown-linux-gnu
 add macos   "${RELEASE_MACOS:-false}"   "${VERSION_MACOS:-}"   macos-latest  dylib macos-aarch64 aarch64-apple-darwin
-[[ "${RELEASE_WINDOWS:-false}" != true ]] || { echo 'ci-plan: Hermes installer does not support Windows yet' >&2; exit 2; }
+add windows "${RELEASE_WINDOWS:-false}" "${VERSION_WINDOWS:-}" windows-latest dll windows-x86_64 x86_64-pc-windows-msvc
 
 ((${#entries[@]} > 0)) || { echo 'ci-plan: select at least one platform' >&2; exit 2; }
 printf '%s\n' "${entries[@]}" | jq -cs '{include: .}'

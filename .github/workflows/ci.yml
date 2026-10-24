@@ -9,7 +9,10 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,13 +25,18 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Build UI assets
+        shell: bash
         run: scripts/build-ui.sh
       - name: Rust checks
         run: cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings
         env:
           POM_UI_REQUIRE_DIST: '1'
       - name: Dashboard bridge tests
-        run: python3 -m unittest discover -s tests -p 'test_runtime.py'
+        run: python -m unittest discover -s tests -p 'test_runtime.py'
       - name: Release plan
+        if: runner.os == 'Linux'
         run: tests/test_ci_plan.sh

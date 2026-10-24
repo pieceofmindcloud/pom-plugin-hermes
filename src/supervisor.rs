@@ -1,5 +1,5 @@
 //! Background install and supervised Hermes dashboard. IPC never waits for a download.
-use crate::{context::Context, plugin_directory};
+use crate::{context::Context, installer, plugin_directory};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -108,7 +108,7 @@ impl Supervisor {
         fs::create_dir_all(&base).map_err(|_| "Cannot create Hermes runtime directory")?;
         private_directory(&base)?;
         let script = base.join("runtime.py");
-        fs::write(&script, SCRIPT).map_err(|_| "Cannot prepare Hermes installer")?;
+        fs::write(&script, SCRIPT).map_err(|_| "Cannot prepare Hermes bridge")?;
         self.stop();
         let home = self
             .context
@@ -129,66 +129,13 @@ impl Supervisor {
             "installing",
             "Downloading and building pinned Hermes Agent (see install.log)",
         );
-        let log =
-            fs::File::create(base.join("install.log")).map_err(|_| "Cannot open install log")?;
-        let errors = log.try_clone().map_err(|_| "Cannot open install log")?;
-        let mut installer = Command::new("python3");
-        installer
-            .args([
-                script.as_os_str(),
-                "install".as_ref(),
-                base.as_os_str(),
-                home.as_os_str(),
-            ])
-            .stdin(Stdio::null())
-            .stdout(log)
-            .stderr(errors);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            installer.process_group(0);
-            #[cfg(target_os = "linux")]
-            unsafe {
-                installer.pre_exec(|| {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        *self.installer.lock().unwrap() = Some(
-            installer
-                .spawn()
-                .map_err(|_| "Python 3, bash, git and network access are required")?,
-        );
-        loop {
-            let outcome = {
-                let mut installer = self.installer.lock().unwrap();
-                match installer.as_mut() {
-                    None => return Err("Hermes installation interrupted".into()),
-                    Some(child) => match child.try_wait() {
-                        Ok(Some(exit)) => {
-                            *installer = None;
-                            Some(exit)
-                        }
-                        Ok(None) => None,
-                        Err(_) => return Err("Cannot monitor Hermes installation".into()),
-                    },
-                }
-            };
-            if let Some(exit) = outcome {
-                if !exit.success() {
-                    return Err("Hermes installation failed; see install.log".into());
-                }
-                break;
-            }
-            thread::sleep(Duration::from_millis(500));
-        }
+        let python = installer::ensure(&base, &home, |command| {
+            self.run_install_step(command, &base)
+        })?;
         self.set("starting", "Starting Hermes dashboard");
         let log =
             fs::File::create(base.join("bridge.log")).map_err(|_| "Cannot open bridge log")?;
-        let mut cmd = Command::new("python3");
+        let mut cmd = Command::new(python);
         cmd.arg(script)
             .arg("serve")
             .arg(&base)
@@ -249,11 +196,75 @@ impl Supervisor {
         }
         Ok(())
     }
+    fn run_install_step(&self, mut command: Command, base: &Path) -> Result<(), String> {
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(base.join("install.log"))
+            .map_err(|_| "Cannot open Hermes install log")?;
+        let errors = log
+            .try_clone()
+            .map_err(|_| "Cannot open Hermes install log")?;
+        command.stdin(Stdio::null()).stdout(log).stderr(errors);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+            #[cfg(target_os = "linux")]
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        *self.installer.lock().unwrap() = Some(
+            command
+                .spawn()
+                .map_err(|_| "Cannot start Hermes managed runtime; see install.log")?,
+        );
+        loop {
+            let outcome = {
+                let mut installer = self.installer.lock().unwrap();
+                match installer.as_mut() {
+                    None => return Err("Hermes installation interrupted".into()),
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(exit)) => {
+                            *installer = None;
+                            Some(exit)
+                        }
+                        Ok(None) => None,
+                        Err(_) => return Err("Cannot monitor Hermes installation".into()),
+                    },
+                }
+            };
+            if let Some(exit) = outcome {
+                return if exit.success() {
+                    Ok(())
+                } else {
+                    Err("Hermes installation failed; see install.log".into())
+                };
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
     pub(crate) fn stop(&self) {
         if let Some(mut child) = self.installer.lock().unwrap().take() {
             #[cfg(unix)]
             unsafe {
                 libc::killpg(child.id() as i32, libc::SIGTERM);
+            }
+            #[cfg(windows)]
+            {
+                // PM and npm spawn grandchildren. taskkill is a Windows OS
+                // command, not an install-time prerequisite for Hermes.
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &child.id().to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -278,6 +289,8 @@ impl Drop for Supervisor {
 }
 
 fn private_directory(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
