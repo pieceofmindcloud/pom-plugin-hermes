@@ -38,7 +38,60 @@ fn uv_artifact() -> Result<Artifact, String> {
     Ok(Artifact { url, sha, zipped })
 }
 
-fn download(url: &str, target: &Path, sha: &str, max: u64) -> Result<(), String> {
+/// The stages of a fresh install, in order, as the screen reports them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Step {
+    Source,
+    Uv,
+    Python,
+    Packages,
+    Dashboard,
+    Connect,
+}
+
+impl Step {
+    pub fn code(self) -> &'static str {
+        match self {
+            Step::Source => "source",
+            Step::Uv => "uv",
+            Step::Python => "python",
+            Step::Packages => "packages",
+            Step::Dashboard => "dashboard",
+            Step::Connect => "connect",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum InstallMode {
+    /// Nothing installed yet.
+    Fresh,
+    /// Installed from another pinned source, or not finished: install again.
+    Update,
+    /// The pinned source is installed; starting only checks it.
+    Installed,
+}
+
+pub fn install_mode(base: &Path) -> InstallMode {
+    match fs::read_to_string(base.join(".installed")) {
+        Err(_) => InstallMode::Fresh,
+        Ok(sha)
+            if sha == SOURCE_SHA
+                && base.join("source/hermes_cli/web_dist/index.html").is_file() =>
+        {
+            InstallMode::Installed
+        }
+        Ok(_) => InstallMode::Update,
+    }
+}
+
+fn download(
+    url: &str,
+    target: &Path,
+    sha: &str,
+    max: u64,
+    progress: &mut dyn FnMut(f64),
+) -> Result<(), String> {
     if target.is_file() && hash_file(target).is_ok_and(|hash| hash == sha) {
         return Ok(());
     }
@@ -59,6 +112,11 @@ fn download(url: &str, target: &Path, sha: &str, max: u64) -> Result<(), String>
                 transport.kind()
             ),
         })?;
+    let total = response
+        .header("Content-Length")
+        .and_then(|length| length.parse::<u64>().ok())
+        .filter(|length| *length > 0)
+        .unwrap_or(max);
     let mut reader = response.into_reader();
     let mut out = fs::File::create(&part).map_err(|_| "Cannot write runtime download")?;
     let mut hash = Sha256::new();
@@ -79,6 +137,7 @@ fn download(url: &str, target: &Path, sha: &str, max: u64) -> Result<(), String>
             out.write_all(&bytes[..read])
                 .map_err(|_| "Cannot write runtime download")?;
             hash.update(&bytes[..read]);
+            progress((size as f64 / total as f64).min(1.0));
         }
         out.sync_all()
             .map_err(|_| "Cannot commit runtime download")?;
@@ -369,23 +428,29 @@ pub fn register_pom(
 }
 
 /// `run` owns children so a plugin-host shutdown can stop installation.
+/// `report` hears each step as it starts and, for the downloads, the fraction done.
 pub fn ensure(
     base: &Path,
     home: &Path,
     mut run: impl FnMut(Command) -> Result<(), String>,
+    mut report: impl FnMut(Step, Option<f64>),
 ) -> Result<PathBuf, String> {
     let source = base.join("source");
     let marker = base.join(".installed");
-    if marker.is_file()
-        && fs::read_to_string(&marker).ok().as_deref() == Some(SOURCE_SHA)
-        && source.join("hermes_cli/web_dist/index.html").is_file()
-    {
+    if install_mode(base) == InstallMode::Installed {
         let python = find_python(base)?;
         ensure_web_base(base, home, &python, &source, &mut run)?;
         return Ok(python);
     }
     let source_archive = base.join("source.tar.gz");
-    download(SOURCE_URL, &source_archive, SOURCE_SHA, MAX_SOURCE)?;
+    report(Step::Source, Some(0.0));
+    download(
+        SOURCE_URL,
+        &source_archive,
+        SOURCE_SHA,
+        MAX_SOURCE,
+        &mut |done| report(Step::Source, Some(done)),
+    )?;
     let source = extract_source(&source_archive, base)?;
     let uv_artifact = uv_artifact()?;
     let boot = base.join("bootstrap");
@@ -395,11 +460,19 @@ pub fn ensure(
     } else {
         "uv.tar.gz"
     });
-    download(uv_artifact.url, &uv_archive, uv_artifact.sha, MAX_UV)?;
+    report(Step::Uv, Some(0.0));
+    download(
+        uv_artifact.url,
+        &uv_archive,
+        uv_artifact.sha,
+        MAX_UV,
+        &mut |done| report(Step::Uv, Some(done)),
+    )?;
     let uv = extract_uv(&uv_archive, &boot, uv_artifact)?;
     let mut python_install = Command::new(&uv);
     python_install.args(["python", "install", "--no-bin", "--no-registry", "3.14.9"]);
     environment(&mut python_install, base, home, &source);
+    report(Step::Python, None);
     run(python_install)?;
     let python = find_python(base)?;
     let mut pm = Command::new(&python);
@@ -413,6 +486,7 @@ pub fn ensure(
         "cua-driver",
     ]);
     environment(&mut pm, base, home, &source);
+    report(Step::Packages, None);
     run(pm)?;
     seed_config(home, &source)?;
     configure_web_base(&source)?;
@@ -430,6 +504,7 @@ pub fn ensure(
         ])
         .arg(&source);
     environment(&mut completion, base, home, &source);
+    report(Step::Dashboard, None);
     run(completion)?;
     if !web_is_prefixed(&source) {
         return Err(
@@ -446,6 +521,24 @@ pub fn ensure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn install_mode_tells_fresh_update_and_installed_apart() {
+        let base = std::env::temp_dir().join(format!("pom-hermes-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("source/hermes_cli/web_dist")).unwrap();
+        assert_eq!(install_mode(&base), InstallMode::Fresh);
+        fs::write(base.join(".installed"), "another-sha").unwrap();
+        assert_eq!(install_mode(&base), InstallMode::Update);
+        fs::write(base.join(".installed"), SOURCE_SHA).unwrap();
+        assert_eq!(
+            install_mode(&base),
+            InstallMode::Update,
+            "no dashboard build yet"
+        );
+        fs::write(base.join("source/hermes_cli/web_dist/index.html"), "<html>").unwrap();
+        assert_eq!(install_mode(&base), InstallMode::Installed);
+        fs::remove_dir_all(&base).unwrap();
+    }
     #[test]
     #[ignore = "downloads and installs the pinned Hermes runtime (several gigabytes)"]
     fn installs_without_system_python_git_or_curl() {
@@ -467,19 +560,24 @@ mod tests {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let python = ensure(&base, &home, |mut command| {
-            #[cfg(unix)]
-            command.env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", base.join("blocked-bin").display()),
-            );
-            let status = command.status().map_err(|e| e.to_string())?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("installer exited: {status}"))
-            }
-        })
+        let python = ensure(
+            &base,
+            &home,
+            |mut command| {
+                #[cfg(unix)]
+                command.env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", base.join("blocked-bin").display()),
+                );
+                let status = command.status().map_err(|e| e.to_string())?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("installer exited: {status}"))
+                }
+            },
+            |_, _| {},
+        )
         .unwrap();
         assert!(python.is_file());
         assert!(base.join("source/hermes_cli/web_dist/index.html").is_file());

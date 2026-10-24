@@ -1,5 +1,9 @@
 //! Background install and supervised Hermes dashboard. IPC never waits for a download.
-use crate::{context::Context, installer, plugin_directory};
+use crate::{
+    context::Context,
+    installer::{self, InstallMode, Step},
+    plugin_directory,
+};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -8,7 +12,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const SCRIPT: &str = include_str!("../runtime.py");
@@ -24,6 +28,11 @@ pub struct Status {
     pub detail: String,
     port: Option<u16>,
     token: Option<String>,
+    /// While installing: the current step, when it started and, for a
+    /// download, the fraction done.
+    step: Option<(Step, Instant, Option<f64>)>,
+    /// While installing: `install` or `update`.
+    mode: Option<&'static str>,
 }
 impl Status {
     fn new(phase: &str, detail: &str) -> Self {
@@ -32,10 +41,22 @@ impl Status {
             detail: detail.into(),
             port: None,
             token: None,
+            step: None,
+            mode: None,
         }
     }
     pub fn public(&self) -> Value {
-        json!({"status": self.phase, "detail": self.detail})
+        let mut public = json!({"status": self.phase, "detail": self.detail});
+        if self.phase == "installing" {
+            if let Some((step, since, measured)) = self.step {
+                public["step"] = json!(step.code());
+                public["progress"] = json!(progress_at(step, since.elapsed(), measured));
+            }
+            if let Some(mode) = self.mode {
+                public["mode"] = json!(mode);
+            }
+        }
+        public
     }
     pub fn upstream(&self) -> Value {
         if self.phase == "ready" {
@@ -47,6 +68,32 @@ impl Status {
         }
     }
 }
+/// Each step's share of the bar, `(start, end)`, and for an unmeasured step
+/// the time constant of its creep.
+fn weights(step: Step) -> (f64, f64, f64) {
+    match step {
+        Step::Source => (0.0, 5.0, 0.0),
+        Step::Uv => (5.0, 8.0, 0.0),
+        Step::Python => (8.0, 20.0, 30.0),
+        Step::Packages => (20.0, 75.0, 180.0),
+        Step::Dashboard => (75.0, 95.0, 90.0),
+        Step::Connect => (95.0, 100.0, 5.0),
+    }
+}
+
+/// The bar while `step` runs: a download follows its bytes, any other step
+/// creeps toward its end with time. Neither reaches the end: that value is the
+/// next step's start, reported only when the step really finished.
+pub fn progress_at(step: Step, elapsed: Duration, measured: Option<f64>) -> u8 {
+    let (start, end, tau) = weights(step);
+    let fraction = match measured {
+        Some(done) => done.clamp(0.0, 1.0),
+        None if tau > 0.0 => 1.0 - (-elapsed.as_secs_f64() / tau).exp(),
+        None => 0.0,
+    };
+    (start + (end - start) * 0.95 * fraction).floor() as u8
+}
+
 pub struct Supervisor {
     status: Mutex<Status>,
     process: Mutex<Option<Running>>,
@@ -73,7 +120,8 @@ impl Supervisor {
     pub fn configure(self: &Arc<Self>, context: Context) {
         *self.context.lock().unwrap() = context.clone();
         // After a restart, keep the operator's Hermes configuration and start
-        // the existing installation. A new install is always opt-in.
+        // the existing installation. A new install starts when someone opens
+        // the Hermes screen: opening it is the opt-in.
         if let Ok(base) = plugin_directory() {
             if base.join(".installed").exists() {
                 self.launch(None);
@@ -131,14 +179,38 @@ impl Supervisor {
                 configure_model(&home, &model, &self.context.lock().unwrap())?;
             }
         }
-        self.set(
-            "installing",
-            "Downloading and building pinned Hermes Agent (see install.log)",
-        );
-        let python = installer::ensure(&base, &home, |command| {
-            self.run_install_step(command, &base)
-        })?;
+        // Only a fresh install or an update shows the installer; starting an
+        // installed Hermes still checks it, under the generic loader.
+        let mode = match installer::install_mode(&base) {
+            InstallMode::Fresh => Some("install"),
+            InstallMode::Update => Some("update"),
+            InstallMode::Installed => None,
+        };
+        match mode {
+            Some(_) => self.set(
+                "installing",
+                "Installing pinned Hermes Agent (see install.log)",
+            ),
+            None => self.set("starting", "Starting Hermes dashboard"),
+        }
+        let report = |step: Step, measured: Option<f64>| {
+            let Some(mode) = mode else { return };
+            let mut status = self.status.lock().unwrap();
+            let since = match status.step {
+                Some((current, since, _)) if current == step => since,
+                _ => Instant::now(),
+            };
+            status.step = Some((step, since, measured));
+            status.mode = Some(mode);
+        };
+        let python = installer::ensure(
+            &base,
+            &home,
+            |command| self.run_install_step(command, &base),
+            &report,
+        )?;
         if let Some(gateway) = self.context.lock().unwrap().gateway.clone() {
+            report(Step::Connect, None);
             installer::register_pom(
                 &base,
                 &home,
@@ -197,6 +269,8 @@ impl Supervisor {
             detail: "Hermes dashboard is running".into(),
             port: Some(port),
             token: Some(token.into()),
+            step: None,
+            mode: None,
         };
         loop {
             thread::sleep(Duration::from_secs(2));
@@ -373,6 +447,47 @@ fn configure_model(home: &Path, model: &str, context: &Context) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::installer::Step;
+    use std::time::Duration;
+    const SECOND: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn an_unmeasured_step_starts_at_its_start_and_never_reaches_its_end() {
+        assert_eq!(progress_at(Step::Packages, Duration::ZERO, None), 20);
+        assert!(progress_at(Step::Packages, SECOND * 10_000, None) < 75);
+        let mut last = 0;
+        for seconds in 0..600 {
+            let now = progress_at(Step::Packages, SECOND * seconds, None);
+            assert!(now >= last, "went back at {seconds}s");
+            last = now;
+        }
+        assert!(last > 60, "still crawling at 10 minutes: {last}");
+    }
+
+    #[test]
+    fn a_measured_step_follows_its_fraction() {
+        assert_eq!(progress_at(Step::Source, Duration::ZERO, Some(0.5)), 2);
+        assert_eq!(progress_at(Step::Uv, Duration::ZERO, Some(1.0)), 7);
+        assert_eq!(progress_at(Step::Connect, SECOND * 600, None), 99);
+    }
+
+    #[test]
+    fn an_installing_status_carries_step_progress_and_mode() {
+        let mut status = Status::new("installing", "Installing");
+        status.mode = Some("update");
+        status.step = Some((Step::Python, std::time::Instant::now(), None));
+        let public = status.public();
+        assert_eq!(public["step"], "python");
+        assert_eq!(public["progress"], 8);
+        assert_eq!(public["mode"], "update");
+        let ready = Status::new("ready", "ok").public();
+        assert!(
+            ready.get("step").is_none()
+                && ready.get("progress").is_none()
+                && ready.get("mode").is_none()
+        );
+    }
+
     #[test]
     fn status_never_leaks_token() {
         let status = Status {
@@ -380,6 +495,8 @@ mod tests {
             detail: "ok".into(),
             port: Some(42),
             token: Some("secret-secret-secret".into()),
+            step: None,
+            mode: None,
         };
         assert!(!status.public().to_string().contains("secret"));
         assert_eq!(status.upstream()["token"], "secret-secret-secret");
