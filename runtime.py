@@ -241,6 +241,23 @@ def stop_hermes(child, home, grace=2.0):
     print(f"stopped {len(signalled)} Hermes processes in {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
 
 
+def watch_dashboard(child, home=None, interval=2.0):
+    """End the bridge when its dashboard exits: the supervisor watches the
+    bridge, so a dashboard dead under a live bridge would go unnoticed."""
+    import threading
+
+    def watch():
+        while child.poll() is None:
+            time.sleep(interval)
+        if os.name == "nt":
+            # SIGTERM to self would terminate at once, skipping the cleanup.
+            stop_hermes(child, home)
+            os._exit(0)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def serve(base, home, workspace):
     adopt_orphans()
     # PDEATHSIG and POM stopping the host arrive as SIGTERM: still run the cleanup.
@@ -284,6 +301,7 @@ def serve(base, home, workspace):
         if os.name != "nt":
             threading.Thread(target=lambda: [reap_orphans(child.pid) or time.sleep(5) for _ in iter(int, 1)],
                              daemon=True).start()
+        watch_dashboard(child, home)
         while sys.stdin.buffer.read(1):
             pass
         server.shutdown()

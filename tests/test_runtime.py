@@ -148,6 +148,29 @@ def alive(pid):
     except OSError:
         return False
 
+WATCH_DRIVER = r"""
+import importlib.util, signal, subprocess, sys
+spec = importlib.util.spec_from_file_location("runtime", sys.argv[1])
+runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"])
+runtime.watch_dashboard(child, interval=0.1)
+sys.stdin.buffer.read(1)
+"""
+
+class WatchTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "SIGTERM to self is POSIX")
+    def test_the_bridge_exits_when_its_dashboard_exits(self):
+        # The supervisor only notices a dead bridge: a dashboard that died
+        # under a live bridge left POM showing a blank Hermes screen.
+        import subprocess
+        bridge = subprocess.Popen([sys.executable, "-c", WATCH_DRIVER, str(Path(runtime.__file__))],
+                                  stdin=subprocess.PIPE)
+        try:
+            self.assertEqual(bridge.wait(timeout=5), 0)
+        finally:
+            if bridge.poll() is None: bridge.kill()
+
 class ShutdownTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "subreaper adoption is Linux-only")
     def test_stop_ends_detached_descendants_and_the_recorded_gateway(self):
