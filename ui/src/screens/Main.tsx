@@ -17,7 +17,10 @@ const URL = "/api/ui/plugins/hermes/proxy/";
  * to `loader.*` and installs by itself the first time someone opens it.
  */
 export function Main() {
-  const { t } = usePluginI18n();
+  const { t: translate } = usePluginI18n();
+  // `t` is a new function on every render; the status effect must not run on renders.
+  const t = useRef(translate);
+  t.current = translate;
   const [status, setStatus] = useState<Status | null>(null);
   // An install ran in this mount: the end is a success, not a plain opening.
   const installed = useRef(false);
@@ -61,7 +64,8 @@ export function Main() {
   useEffect(() => {
     if (!status) return;
     if (status.status !== "error") retrying.current = false;
-    const title = t(status.mode === "update" ? "loader.updating" : "loader.installing");
+    const say = t.current;
+    const title = say(status.mode === "update" ? "loader.updating" : "loader.installing");
     switch (status.status) {
       case "waiting":
         if (!asked.current) install();
@@ -69,22 +73,22 @@ export function Main() {
         break;
       case "installing":
         installed.current = true;
-        void loader.progress({ title, progress: status.progress ?? 0, message: status.step ? t(`step.${status.step}`) : undefined });
+        void loader.progress({ title, progress: status.progress ?? 0, message: status.step ? say(`step.${status.step}`) : undefined });
         break;
       case "starting":
         void (installed.current
-          ? loader.progress({ title, progress: 100, message: t("step.starting") })
-          : loader.show({ message: t("step.starting") }));
+          ? loader.progress({ title, progress: 100, message: say("step.starting") })
+          : loader.show({ message: say("step.starting") }));
         break;
       case "error":
         if (retrying.current) break;
-        void loader.error({ title: opened.current ? t("loader.stopped") : undefined, message: status.detail });
+        void loader.error({ title: opened.current ? say("loader.stopped") : undefined, message: status.detail });
         break;
       case "ready":
         // The iframe's load opens the screen.
         break;
     }
-  }, [status, t, install]);
+  }, [status, install]);
 
   const frameLoaded = () => {
     opened.current = true;
@@ -94,7 +98,7 @@ export function Main() {
 
   if (hostVersion() < 7) {
     const { ErrorState } = ui();
-    return <ErrorState title={t("main.title")} error={t("main.hostTooOld")} />;
+    return <ErrorState title={translate("main.title")} error={translate("main.hostTooOld")} />;
   }
   return (
     <div className="pb-page">
