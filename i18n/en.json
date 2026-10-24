@@ -1,13 +1,14 @@
 {
   "main.title": "Hermes Agent",
-  "main.subtitle": "Install and use the Hermes dashboard within POM",
-  "main.setup": "Setup",
-  "main.open": "Open Hermes",
-  "main.loading": "Loading...",
-  "main.explain": "Install the pinned Hermes Agent release on this node. Models deployed in POM are loaded into Hermes automatically after installation. Installation may take several minutes.",
-  "main.model": "POM model ID (optional)",
-  "main.modelPlaceholder": "Deployed model ID",
-  "main.optional": "Leave blank to choose a provider in the Hermes dashboard. Deployed POM models are listed in Hermes under the POM provider. Credentials are stored only on this node.",
-  "main.install": "Install and open Hermes",
-  "main.retry": "Retry installation"
+  "main.hostTooOld": "This Hermes Agent needs a newer POM (plugin host version 7). Update POM to use it.",
+  "loader.installing": "Installing Hermes Agent",
+  "loader.updating": "Updating Hermes Agent",
+  "loader.stopped": "Hermes Agent stopped",
+  "step.source": "Downloading Hermes Agent",
+  "step.uv": "Preparing the installer",
+  "step.python": "Downloading the Python runtime",
+  "step.packages": "Installing Python packages",
+  "step.dashboard": "Building the dashboard",
+  "step.connect": "Connecting to POM's models",
+  "step.starting": "Starting Hermes Agent"
 }
