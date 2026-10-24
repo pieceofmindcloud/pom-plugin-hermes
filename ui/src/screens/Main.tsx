@@ -24,6 +24,8 @@ export function Main() {
   const [status, setStatus] = useState<Status | null>(null);
   // An install ran in this mount: the end is a success, not a plain opening.
   const installed = useRef(false);
+  // `install` or `update`: `starting` carries no mode, and the bar keeps its title.
+  const mode = useRef<Status["mode"]>(undefined);
   // The install was asked for once already in this mount.
   const asked = useRef(false);
   // The dashboard was on screen, so a later error means it stopped.
@@ -65,7 +67,8 @@ export function Main() {
     if (!status) return;
     if (status.status !== "error") retrying.current = false;
     const say = t.current;
-    const title = say(status.mode === "update" ? "loader.updating" : "loader.installing");
+    if (status.mode) mode.current = status.mode;
+    const title = say(mode.current === "update" ? "loader.updating" : "loader.installing");
     switch (status.status) {
       case "waiting":
         if (!asked.current) install();
