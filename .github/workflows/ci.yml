@@ -28,5 +28,7 @@ jobs:
         run: cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings
         env:
           POM_UI_REQUIRE_DIST: '1'
+      - name: Dashboard bridge tests
+        run: python3 -m unittest discover -s tests -p 'test_runtime.py'
       - name: Release plan
         run: tests/test_ci_plan.sh
